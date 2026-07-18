@@ -15,17 +15,34 @@ module SubpathIdentity
     # timeout, malformed response) returns nil rather than raising: a
     # stale or missing local profile cache is a degraded page, not a 500.
     module RootProfileClient
-      # Returned by fetch when the provider gives a *definitive* "this
-      # identity resolves to no valid account" answer — HTTP 404, i.e. a
-      # closed/deleted account or an unknown user_id. Distinct from nil,
-      # which means "couldn't tell" (timeout, connection refused, 5xx,
-      # a 401 secret-mismatch, a malformed body). Callers treat GONE as
-      # authoritative revocation — drop the cached profile, sign out —
-      # and nil as a transient failure to degrade-to-cache against.
+      # Returned by fetch when the provider gives a *definitive*, typed
+      # "this identity resolves to no valid account" answer: HTTP 410
+      # Gone with a JSON body of {"error": "account_gone"} — a closed or
+      # deleted account, or an unknown user_id. Distinct from nil, which
+      # means "couldn't tell" (timeout, connection refused, 401, 5xx, a
+      # malformed body). Callers treat GONE as authoritative revocation —
+      # drop the cached profile, sign out — and nil as a transient
+      # failure to degrade-to-cache against.
+      #
+      # A plain 404 is deliberately NOT revocation: 404 says a resource
+      # wasn't found without saying which one. A mistyped
+      # internal_profile_path, a route missing mid-deploy, a stale origin
+      # image (a documented Render failure mode), or an intermediary's
+      # own 404 page all produce it — and treating any of those as
+      # "account gone" would destroy the cached profile and sign real
+      # users out cluster-wide on an infrastructure hiccup. Only the
+      # typed 410 carries revocation semantics; everything else degrades.
       GONE = :account_gone
+      GONE_ERROR = "account_gone"
 
       class << self
-        def fetch(shared_identity_cookie)
+        # expected_user_id: the identity the shared cookie asserts. The
+        # response's own user_id must match it exactly — a provider
+        # routing/cache/serialization bug that returns some OTHER user's
+        # profile must not be persisted and displayed under this user's
+        # identity, so a mismatch degrades to nil like any other
+        # malformed response.
+        def fetch(shared_identity_cookie, expected_user_id:)
           return nil if shared_identity_cookie.blank?
 
           uri = URI("#{root_base_url}#{SubpathIdentity.config.internal_profile_path}")
@@ -44,11 +61,7 @@ module SubpathIdentity
           request["Cookie"] = "#{SubpathIdentity.config.cookie_name}=#{CGI.escape(shared_identity_cookie)}"
 
           response = http.request(request)
-          # 404 is the provider's definitive "no valid account for this
-          # identity" (see subpath_identity-provider's InternalController
-          # — a closed account 404s just like an unknown user_id). Every
-          # other non-success (401, 5xx, ...) is "couldn't tell" -> nil.
-          return GONE if response.is_a?(Net::HTTPNotFound)
+          return GONE if account_gone?(response)
           return nil unless response.is_a?(Net::HTTPSuccess)
 
           profile = JSON.parse(response.body, symbolize_names: true)
@@ -62,6 +75,7 @@ module SubpathIdentity
           # already caught below; this covers the valid-JSON-wrong-shape
           # case that parses without raising.
           return nil unless profile.is_a?(Hash) && profile[:user_id].present? && profile[:cache_key].present?
+          return nil unless profile[:user_id].to_s == expected_user_id.to_s
 
           profile
         rescue Net::OpenTimeout, Net::ReadTimeout, Net::ProtocolError, Net::HTTPBadResponse,
@@ -81,6 +95,20 @@ module SubpathIdentity
         end
 
         private
+
+        # Only a 410 whose JSON body carries the typed marker counts as
+        # revocation (see the GONE constant's comment for why a plain
+        # 404 must not). An intermediary that happens to emit a bare 410
+        # with an HTML error page still doesn't qualify — the body has
+        # to say account_gone.
+        def account_gone?(response)
+          return false unless response.is_a?(Net::HTTPGone)
+
+          body = JSON.parse(response.body, symbolize_names: true)
+          body.is_a?(Hash) && body[:error] == GONE_ERROR
+        rescue JSON::ParserError
+          false
+        end
 
         def root_base_url
           origin = SubpathIdentity.config.root_origin

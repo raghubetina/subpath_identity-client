@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-18
+
+- **`RootProfileClient.fetch` now takes a required `expected_user_id:` keyword** and returns `nil` for a response whose `user_id` doesn't match it — a provider routing/cache/serialization bug can no longer persist and display one account's profile under another account's identity.
+- **Revocation protocol is now a typed 410, not a bare 404.** `fetch` returns `GONE` only for HTTP 410 with a JSON body of `{"error": "account_gone"}`; an untyped 404 (wrong path, route missing mid-deploy, stale origin image, intermediary error page) degrades to `nil` instead of destroying the cached profile and signing the user out cluster-wide. Pair with a provider whose internal endpoint returns the typed 410 (see `subpath_identity-provider`'s README); against an old 404-returning provider the client safely degrades to its cache instead of revoking.
+- **`root_cache_key` now records the cookie's `cache_key` claim, not the provider's.** The provider can legitimately be ahead of the browser cookie (an edit from another device); storing the provider's newer key made every subsequent request mismatch the cookie and refetch on every page load until the cookie was reissued. Storing the cookie's claim converges on the next request while keeping the freshest fetched data.
+- CI now tests the declared floor (Ruby 3.2 / Rails 7.0) alongside the current toolchain, via `gemfiles/rails_7.gemfile`; the dev/test sqlite3 pin is loosened to `>= 1.4` (Active Record 7.0's adapter needs 1.4.x).
+
 ## [0.2.1] - 2026-07-18
 
 - `RootProfileClient.fetch` now returns `nil` for a 2xx response whose body parses as valid JSON but isn't a usable profile — a bare `true`/number/string/array, or an object missing `user_id`/`cache_key`. Previously such a body was returned as a truthy non-`Hash`, and `SyncLocalProfile` would then call `remote[:cache_key]` on it and raise (a 500 on a page that's supposed to degrade to the cache). Only syntactically invalid JSON was caught before.

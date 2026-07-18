@@ -19,8 +19,9 @@ module SubpathIdentity
     #
     # The local model needs exactly two columns this gem manages
     # directly — global_user_id (the identity link) and root_cache_key
-    # (the staleness signal) — plus whatever else sync_remote_profile
-    # populates. See subpath_identity_client:install for a generator
+    # (the staleness signal: the cookie's cache_key claim this row was
+    # last synced under, see upsert_local_profile) — plus whatever else
+    # sync_remote_profile populates. See subpath_identity_client:install for a generator
     # that scaffolds both the migration and a starting model.
     module SyncLocalProfile
       extend ActiveSupport::Concern
@@ -42,7 +43,10 @@ module SubpathIdentity
         model = SubpathIdentity.config.local_profile_model
         profile = model.find_by(global_user_id: current_shared_identity[:user_id])
         if profile.nil? || profile.root_cache_key != current_shared_identity[:cache_key]
-          remote = RootProfileClient.fetch(cookies[SubpathIdentity.config.cookie_name])
+          remote = RootProfileClient.fetch(
+            cookies[SubpathIdentity.config.cookie_name],
+            expected_user_id: current_shared_identity[:user_id]
+          )
           return revoke_local_identity(profile) if remote == RootProfileClient::GONE
 
           profile = upsert_local_profile(model, remote) if remote
@@ -89,18 +93,29 @@ module SubpathIdentity
       # rescue ever gets a chance to run — see the generated model for
       # why there isn't one).
       #
-      # If the losing side of that race is holding a row that reflects
-      # an earlier fetch than the one that just ran, the cache_key
-      # comparison below brings it back in line with what was just
-      # fetched, rather than leaving it stuck on stale data.
+      # root_cache_key records the COOKIE's cache_key claim this row was
+      # last synced under — deliberately not the cache_key the provider
+      # returned. sync_local_profile compares local-vs-cookie, so storing
+      # the provider's (possibly newer) value would never converge: a
+      # cookie still carrying v1 while the provider is already at v2 (an
+      # edit from another device, say) would mismatch on every request
+      # and refetch forever. Storing the cookie's claim converges on the
+      # very next request while still keeping the freshest *data* the
+      # provider returned; when the cookie itself eventually moves to
+      # v2, exactly one more refetch re-marks the row.
+      #
+      # The same rule fixes the losing side of the insert race: whatever
+      # cookie claim THIS request carried is what the row ends up marked
+      # with, so a loser holding an older claim re-syncs once and stops.
       def upsert_local_profile(model, remote)
         sync_block = SubpathIdentity.config.sync_remote_profile
+        cookie_cache_key = current_shared_identity[:cache_key]
         profile = model.create_or_find_by(global_user_id: current_shared_identity[:user_id]) do |record|
-          record.root_cache_key = remote[:cache_key]
+          record.root_cache_key = cookie_cache_key
           sync_block&.call(record, remote)
         end
-        if profile.root_cache_key != remote[:cache_key]
-          profile.root_cache_key = remote[:cache_key]
+        if profile.root_cache_key != cookie_cache_key
+          profile.root_cache_key = cookie_cache_key
           sync_block&.call(profile, remote)
           profile.save!
         end

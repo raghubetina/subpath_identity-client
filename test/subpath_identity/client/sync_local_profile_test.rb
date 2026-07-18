@@ -84,7 +84,7 @@ class SyncLocalProfileTest < Minitest::Test
   def test_does_not_refetch_when_the_cache_key_matches
     LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "cached@example.com")
 
-    SubpathIdentity::Client::RootProfileClient.stub(:fetch, ->(*) { raise "should not be called" }) do
+    SubpathIdentity::Client::RootProfileClient.stub(:fetch, ->(*, **) { raise "should not be called" }) do
       controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
       controller.process(:index)
 
@@ -158,6 +158,67 @@ class SyncLocalProfileTest < Minitest::Test
       assert_nil LocalProfile.find_by(global_user_id: 1)
       refute controller.cleared_shared_identity, "a malformed 2xx is a degrade, not a revocation"
     end
+  end
+
+  # Also through the REAL fetch: a well-formed profile for the WRONG
+  # user (a provider routing/cache bug) must neither create nor update a
+  # row under this user's identity, and must not be treated as
+  # revocation either.
+  def test_a_profile_for_another_user_is_never_persisted_under_this_users_id
+    body = {user_id: 2, email: "user2@example.com", cache_key: "accounts/2-v1"}.to_json
+    ok = Net::HTTPOK.new("1.1", "200", "OK")
+    ok.instance_variable_set(:@read, true)
+    ok.instance_variable_set(:@body, body)
+    fake_http = Object.new
+    fake_http.define_singleton_method(:use_ssl=) { |_| }
+    fake_http.define_singleton_method(:open_timeout=) { |_| }
+    fake_http.define_singleton_method(:read_timeout=) { |_| }
+    fake_http.define_singleton_method(:request) { |_req| ok }
+
+    Net::HTTP.stub(:new, fake_http) do
+      controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+      controller.process(:index)
+
+      assert_nil controller.current_local_profile
+      assert_equal 0, LocalProfile.count, "no row may be written from another user's profile"
+      refute controller.cleared_shared_identity
+    end
+  end
+
+  # Regression for a non-converging refetch loop: on a first visit the
+  # provider can legitimately return a NEWER cache_key than the browser
+  # cookie carries (the account was edited from another device after the
+  # cookie was issued). Storing the provider's key made every subsequent
+  # request mismatch the cookie and refetch forever; storing the
+  # cookie's claim converges — the second request must not contact the
+  # provider at all.
+  def test_a_provider_snapshot_newer_than_the_cookie_does_not_cause_a_refetch_loop
+    body = {user_id: 1, email: "fresh@example.com", cache_key: "accounts/1-v2"}.to_json
+    fetches = 0
+    fake_http = Object.new
+    fake_http.define_singleton_method(:use_ssl=) { |_| }
+    fake_http.define_singleton_method(:open_timeout=) { |_| }
+    fake_http.define_singleton_method(:read_timeout=) { |_| }
+    fake_http.define_singleton_method(:request) do |_req|
+      fetches += 1
+      ok = Net::HTTPOK.new("1.1", "200", "OK")
+      ok.instance_variable_set(:@read, true)
+      ok.instance_variable_set(:@body, body)
+      ok
+    end
+
+    Net::HTTP.stub(:new, fake_http) do
+      2.times do
+        controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+        controller.process(:index)
+
+        assert_equal "fresh@example.com", controller.current_local_profile.email
+      end
+    end
+
+    assert_equal 1, fetches, "the second request must be served from the converged cache"
+    assert_equal "accounts/1-v1", LocalProfile.find_by(global_user_id: 1).root_cache_key,
+      "the row records the cookie's claim it was synced under, not the provider's newer key"
   end
 
   # Regression test for a real race: two concurrent first-visits from the

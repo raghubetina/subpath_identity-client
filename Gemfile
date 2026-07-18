@@ -22,6 +22,6 @@ gem "standard", "~> 1.3"
 
 group :test do
   gem "actionpack", ">= 7.0"
-  gem "sqlite3", ">= 2.0"
+  gem "sqlite3", ">= 1.4"
   gem "railties", ">= 7.0"
 end

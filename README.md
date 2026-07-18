@@ -13,7 +13,7 @@ yet, so declare **both** git sources — pin tags for a reproducible build:
 ```ruby
 # Gemfile
 gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.3.0"
-gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.2.1"
+gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.3.0"
 ```
 
 (Once these are published, `bundle add subpath_identity-client` will pull
@@ -68,6 +68,10 @@ The generated `local_profiles` table has a `root_cache_key` column alongside wha
 
 This means the provider app is responsible for bumping `cache_key` (see its own README) whenever the underlying account changes in a way relying parties should notice.
 
+One subtlety that matters for convergence: `root_cache_key` records the **cookie's** `cache_key` claim the row was last synced under, not the `cache_key` the provider returned. The provider can legitimately be *ahead* of the cookie (the account was edited from another device after this browser's cookie was issued) — if the row stored the provider's newer key, it would mismatch the cookie on every request and refetch forever. Storing the cookie's claim converges on the very next request while still keeping the freshest data the fetch returned; when the cookie itself catches up, exactly one more refetch re-marks the row.
+
+The fetch also refuses to apply a response whose `user_id` isn't the one the cookie asserted — a provider routing or cache bug that returns some *other* user's profile degrades like any malformed response instead of being persisted and displayed under the wrong identity.
+
 ## Concurrency
 
 The first sync for a given user uses `create_or_find_by`, which is safe against two concurrent first-requests from the same user racing to insert the same row — one wins the insert, the other's `RecordNotUnique` is rescued and re-queried. This *requires* the generated model to have no uniqueness validation on `global_user_id` alongside its unique index; see the comment in the generated model for why.
@@ -76,9 +80,11 @@ The first sync for a given user uses `create_or_find_by`, which is safe against 
 
 `RootProfileClient.fetch` returns `nil` — never raises — on timeout, connection failure, TLS failure, a 401/5xx response, or a malformed body. A network hiccup degrades to "keep showing the last cached profile," not a 500.
 
-It distinguishes one case: an HTTP **404** from the provider means "this identity resolves to no valid account" (a closed or deleted account, or an unknown `user_id`), which is authoritative rather than transient. `fetch` returns `RootProfileClient::GONE` for a 404, and `SyncLocalProfile` responds by deleting the local profile row and calling `clear_shared_identity` — which, because the shared cookie is `Path=/`, signs the account out across every app in the cluster on its next request. Everything else stays `nil` and degrades to the cache.
+It distinguishes one case: an HTTP **410 Gone whose JSON body is `{"error": "account_gone"}`** means "this identity resolves to no valid account" (a closed or deleted account, or an unknown `user_id`) — authoritative rather than transient. `fetch` returns `RootProfileClient::GONE` for that typed response, and `SyncLocalProfile` responds by deleting the local profile row and calling `clear_shared_identity` — which, because the shared cookie is `Path=/`, signs the account out across every app in the cluster on its next request. Everything else stays `nil` and degrades to the cache.
 
-For this to hold, your provider's internal endpoint must return 404 for a closed/deleted account, not 200 with stale data (see `subpath_identity-provider`'s README).
+A plain **404 is deliberately not revocation.** 404 says a resource wasn't found without saying which one — a mistyped `internal_profile_path`, a route missing mid-deploy, a stale origin image, or an intermediary's own 404 page all produce it, and treating any of those as "account gone" would destroy cached profiles and sign real users out cluster-wide on an infrastructure hiccup. Only the typed 410 carries revocation semantics; an untyped 410 (an HTML error page, a different error value) doesn't qualify either.
+
+For revocation to work, your provider's internal endpoint must return `410` with `{"error": "account_gone"}` for a closed/deleted/unknown account — not 200 with stale data, and not a bare 404 (see `subpath_identity-provider`'s README for the endpoint pattern). With a provider that still returns 404, nothing breaks: the client just degrades to its cache instead of revoking.
 
 ### Revocation is bounded by the cookie TTL
 

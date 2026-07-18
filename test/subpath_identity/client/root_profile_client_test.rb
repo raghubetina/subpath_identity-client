@@ -35,8 +35,8 @@ class RootProfileClientTest < Minitest::Test
 
   def test_returns_nil_without_making_a_request_when_the_cookie_is_blank
     Net::HTTP.stub(:new, ->(*) { raise "should not be called" }) do
-      assert_nil SubpathIdentity::Client::RootProfileClient.fetch(nil)
-      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("")
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch(nil, expected_user_id: 1)
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("", expected_user_id: 1)
     end
   end
 
@@ -47,7 +47,7 @@ class RootProfileClientTest < Minitest::Test
     response.instance_variable_set(:@body, body)
 
     Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
-      result = SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+      result = SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
       assert_equal 1, result[:user_id]
       assert_equal "a@example.com", result[:email]
     end
@@ -60,7 +60,7 @@ class RootProfileClientTest < Minitest::Test
     response = Net::HTTPUnauthorized.new("1.1", "401", "Unauthorized")
 
     Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
-      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
     end
   end
 
@@ -68,16 +68,64 @@ class RootProfileClientTest < Minitest::Test
     response = Net::HTTPInternalServerError.new("1.1", "500", "Internal Server Error")
 
     Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
-      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
     end
   end
 
-  def test_returns_gone_for_a_404_definitive_missing_or_closed_account
+  def test_returns_nil_for_an_untyped_404_which_could_be_deploy_skew_not_revocation
+    # A 404 doesn't say WHAT was missing: a wrong internal_profile_path,
+    # a route absent mid-deploy, a stale origin image, an intermediary's
+    # own 404 page. None of those mean "this account is gone," and
+    # treating them as revocation would sign real users out cluster-wide
+    # on an infrastructure hiccup. Must degrade to nil, never GONE.
     response = Net::HTTPNotFound.new("1.1", "404", "Not Found")
+    response.instance_variable_set(:@read, true)
+    response.instance_variable_set(:@body, "<html><body>404 route missing</body></html>")
+
+    Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
+    end
+  end
+
+  def test_returns_gone_for_a_410_with_the_typed_account_gone_body
+    response = Net::HTTPGone.new("1.1", "410", "Gone")
+    response.instance_variable_set(:@read, true)
+    response.instance_variable_set(:@body, {error: "account_gone"}.to_json)
 
     Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
       assert_equal SubpathIdentity::Client::RootProfileClient::GONE,
-        SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+        SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
+    end
+  end
+
+  def test_returns_nil_for_a_410_without_the_typed_body
+    # A bare 410 from an intermediary (an HTML error page, an empty
+    # body) doesn't carry the provider's revocation semantics either —
+    # only the typed JSON marker does.
+    [%(<html>410</html>), "", {error: "something_else"}.to_json].each do |body|
+      response = Net::HTTPGone.new("1.1", "410", "Gone")
+      response.instance_variable_set(:@read, true)
+      response.instance_variable_set(:@body, body)
+
+      Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
+        assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1),
+          "expected nil for 410 body #{body.inspect}"
+      end
+    end
+  end
+
+  def test_returns_nil_when_the_response_is_a_profile_for_a_different_user
+    # A provider routing/cache/serialization bug that returns some OTHER
+    # user's profile must not be persisted under this user's identity —
+    # a well-formed response for the wrong user degrades like any other
+    # malformed one.
+    body = {user_id: 2, email: "user2@example.com", cache_key: "accounts/2-v1"}.to_json
+    response = Net::HTTPOK.new("1.1", "200", "OK")
+    response.instance_variable_set(:@read, true)
+    response.instance_variable_set(:@body, body)
+
+    Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
     end
   end
 
@@ -101,7 +149,7 @@ class RootProfileClientTest < Minitest::Test
       response.instance_variable_set(:@body, body)
 
       Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
-        assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+        assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
       end
     end
   end
@@ -118,7 +166,7 @@ class RootProfileClientTest < Minitest::Test
   ].each do |error|
     define_method("test_returns_nil_instead_of_raising_on_#{error.class}") do
       Net::HTTP.stub(:new, FakeNetHTTP.new(error)) do
-        assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+        assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
       end
     end
   end
@@ -129,7 +177,7 @@ class RootProfileClientTest < Minitest::Test
     response.instance_variable_set(:@body, "not json")
 
     Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
-      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie", expected_user_id: 1)
     end
   end
 
@@ -148,7 +196,7 @@ class RootProfileClientTest < Minitest::Test
     end
 
     Net::HTTP.stub(:new, fake) do
-      SubpathIdentity::Client::RootProfileClient.fetch("abc+def/ghi=")
+      SubpathIdentity::Client::RootProfileClient.fetch("abc+def/ghi=", expected_user_id: 1)
     end
 
     assert_equal "_shared_identity=abc%2Bdef%2Fghi%3D", seen_header
