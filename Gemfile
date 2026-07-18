@@ -2,9 +2,13 @@
 
 source "https://rubygems.org"
 
-# Local sibling checkout, not yet published — remove once subpath_identity
-# has a real release on RubyGems.org and this can resolve normally.
-gem "subpath_identity", path: "../subpath_identity"
+# Not yet on RubyGems.org, so point Bundler at the GitHub source here —
+# a path: to a sibling checkout only resolves on a machine that happens
+# to have core checked out next door, which is why this gem's own CI
+# (and anyone else's clone) couldn't `bundle install`. Remove once
+# subpath_identity has a real release and the gemspec dependency resolves
+# from RubyGems normally.
+gem "subpath_identity", github: "raghubetina/subpath_identity"
 
 # Specify your gem's dependencies in subpath_identity-client.gemspec
 gemspec

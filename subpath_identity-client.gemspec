@@ -34,7 +34,10 @@ Gem::Specification.new do |spec|
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
 
-  spec.add_dependency "subpath_identity", ">= 0.1", "< 1.0"
+  # >= 0.2: this gem calls SubpathIdentity::ControllerHelpers#clear_shared_identity
+  # (added in core 0.2.0) on a provider "account gone", and speaks the
+  # v2 cookie format. An older 0.1 core satisfies "< 1.0" but lacks both.
+  spec.add_dependency "subpath_identity", ">= 0.2", "< 1.0"
   spec.add_dependency "activesupport", ">= 7.0"
   spec.add_dependency "activerecord", ">= 7.0"
   spec.add_dependency "railties", ">= 7.0"

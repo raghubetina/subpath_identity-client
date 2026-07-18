@@ -63,11 +63,18 @@ module SubpathIdentity
       # the whole point of the cache_key), so a closure made elsewhere
       # that doesn't re-encode this visitor's cookie isn't noticed until
       # something does force a fetch, or until the cookie hits its own
-      # TTL. Closing that window entirely would mean re-validating with
-      # the provider on every request, defeating the cache. clear_shared_identity
-      # comes from SubpathIdentity::ControllerHelpers (include it first).
+      # TTL — and the cached row's columns (email, name, ...) persist in
+      # this app's own database until then regardless. The shared cookie
+      # TTL bounds *display*, not *retention*; see the README. Closing
+      # that window would mean re-validating on every request, defeating
+      # the cache. clear_shared_identity comes from
+      # SubpathIdentity::ControllerHelpers (include it first).
+      #
+      # destroy!, not destroy: a model callback that aborts the delete
+      # should surface loudly on a revocation path, not be swallowed into
+      # "we said we revoked but the PII row is still there."
       def revoke_local_identity(profile)
-        profile&.destroy
+        profile&.destroy!
         clear_shared_identity
         @current_local_profile = nil
       end
