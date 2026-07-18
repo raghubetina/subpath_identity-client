@@ -81,6 +81,31 @@ class RootProfileClientTest < Minitest::Test
     end
   end
 
+  # A 2xx whose body parses as valid JSON but isn't a usable profile —
+  # a bare scalar/array, or an object missing user_id/cache_key. These
+  # parse without raising (so JSON::ParserError doesn't catch them) and
+  # must degrade to nil, not be returned as a truthy non-Hash that the
+  # caller then dereferences and 500s on.
+  {
+    "true" => "true",
+    "a_number" => "42",
+    "a_string" => %("just a string"),
+    "an_array" => "[1,2,3]",
+    "an_empty_object" => "{}",
+    "an_object_missing_cache_key" => {user_id: 1, email: "a@example.com"}.to_json,
+    "an_object_missing_user_id" => {cache_key: "accounts/1-v1"}.to_json
+  }.each do |name, body|
+    define_method("test_returns_nil_for_a_2xx_body_that_is_#{name}") do
+      response = Net::HTTPOK.new("1.1", "200", "OK")
+      response.instance_variable_set(:@read, true)
+      response.instance_variable_set(:@body, body)
+
+      Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
+        assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+      end
+    end
+  end
+
   [
     Net::OpenTimeout.new("timed out"),
     Net::ReadTimeout.new("timed out"),

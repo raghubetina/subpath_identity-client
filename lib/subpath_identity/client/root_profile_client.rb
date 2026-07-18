@@ -51,7 +51,19 @@ module SubpathIdentity
           return GONE if response.is_a?(Net::HTTPNotFound)
           return nil unless response.is_a?(Net::HTTPSuccess)
 
-          JSON.parse(response.body, symbolize_names: true)
+          profile = JSON.parse(response.body, symbolize_names: true)
+          # A 2xx whose body parses cleanly but isn't a usable profile —
+          # a bare true/number/string/array, or an object missing the
+          # keys the caller dereferences — is an upstream or intermediary
+          # bug, not a real profile. Degrade to nil (caller keeps its
+          # cache) rather than hand back a truthy non-Hash that
+          # SyncLocalProfile would then call remote[:cache_key] on and
+          # 500. JSON::ParserError (a syntactically invalid body) is
+          # already caught below; this covers the valid-JSON-wrong-shape
+          # case that parses without raising.
+          return nil unless profile.is_a?(Hash) && profile[:user_id].present? && profile[:cache_key].present?
+
+          profile
         rescue Net::OpenTimeout, Net::ReadTimeout, Net::ProtocolError, Net::HTTPBadResponse,
           SocketError, SystemCallError, EOFError, OpenSSL::SSL::SSLError, JSON::ParserError
           # SystemCallError is the parent of every Errno::* the

@@ -134,6 +134,32 @@ class SyncLocalProfileTest < Minitest::Test
     end
   end
 
+  # Exercises the REAL RootProfileClient.fetch (only the HTTP layer is
+  # stubbed), not a stubbed fetch — this is the exact path that used to
+  # 500: a 2xx body of bare `true` came back truthy-but-not-a-Hash and
+  # sync_local_profile called remote[:cache_key] on it. fetch now
+  # degrades a malformed body to nil, so the before_action survives.
+  def test_a_malformed_provider_body_degrades_instead_of_crashing_the_before_action
+    ok = Net::HTTPOK.new("1.1", "200", "OK")
+    ok.instance_variable_set(:@read, true)
+    ok.instance_variable_set(:@body, "true")
+    fake_http = Object.new
+    fake_http.define_singleton_method(:use_ssl=) { |_| }
+    fake_http.define_singleton_method(:open_timeout=) { |_| }
+    fake_http.define_singleton_method(:read_timeout=) { |_| }
+    fake_http.define_singleton_method(:request) { |_req| ok }
+
+    Net::HTTP.stub(:new, fake_http) do
+      # First visit (no local row) forces the fetch.
+      controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+      controller.process(:index)
+
+      assert_nil controller.current_local_profile
+      assert_nil LocalProfile.find_by(global_user_id: 1)
+      refute controller.cleared_shared_identity, "a malformed 2xx is a degrade, not a revocation"
+    end
+  end
+
   # Regression test for a real race: two concurrent first-visits from the
   # same user can both see no local row and both attempt to insert one.
   # create_or_find_by is relied on to rescue that instead of raising —

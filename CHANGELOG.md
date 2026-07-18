@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-18
+
+- `RootProfileClient.fetch` now returns `nil` for a 2xx response whose body parses as valid JSON but isn't a usable profile — a bare `true`/number/string/array, or an object missing `user_id`/`cache_key`. Previously such a body was returned as a truthy non-`Hash`, and `SyncLocalProfile` would then call `remote[:cache_key]` on it and raise (a 500 on a page that's supposed to degrade to the cache). Only syntactically invalid JSON was caught before.
+- Install docs now use a GitHub source (the gems aren't on RubyGems yet, so `bundle add` can't resolve them).
+
 ## [0.2.0] - 2026-07-18
 
 - `RootProfileClient.fetch` now returns `RootProfileClient::GONE` (instead of `nil`) for an HTTP 404, distinguishing a definitive "no valid account" from a transient failure. `SyncLocalProfile` treats `GONE` as revocation: it destroys the local profile row (with `destroy!`, so an aborted callback surfaces rather than silently retaining PII) and calls `clear_shared_identity` (from `subpath_identity`'s `ControllerHelpers`), signing the account out cluster-wide. This only triggers on a `cache_key` mismatch that forces a fetch — see the README's "Revocation is bounded by the cookie TTL," which also documents that cached PII is *retained* in the local table until then, separate from display revocation.
