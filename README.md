@@ -12,8 +12,8 @@ yet, so declare **both** git sources — pin tags for a reproducible build:
 
 ```ruby
 # Gemfile
-gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.3.0"
-gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.3.0"
+gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.3.1"
+gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.3.1"
 ```
 
 (Once these are published, `bundle add subpath_identity-client` will pull

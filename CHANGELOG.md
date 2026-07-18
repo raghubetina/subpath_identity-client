@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-18
+
+- Declared Rails floors raised to `>= 8.1` (activesupport/activerecord/railties) — the toolchain CI actually tests. Rails 7 was never deliberately supported, only inherited from scaffolding defaults; the 0.3.0 floor-CI rig (`gemfiles/rails_7.gemfile`, the Ruby 3.2 job, the sqlite3 `>= 1.4` loosening) is removed.
+
 ## [0.3.0] - 2026-07-18
 
 - **`RootProfileClient.fetch` now takes a required `expected_user_id:` keyword** and returns `nil` for a response whose `user_id` doesn't match it — a provider routing/cache/serialization bug can no longer persist and display one account's profile under another account's identity.

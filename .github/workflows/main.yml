@@ -13,27 +13,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    name: Ruby ${{ matrix.ruby }} (${{ matrix.name }})
+    name: Ruby ${{ matrix.ruby }}
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          # Current toolchain: full default task (tests + standard),
-          # resolved from the committed Gemfile.lock.
-          - ruby: "4.0.1"
-            gemfile: Gemfile
-            name: current
-            task: rake
-          # The declared floor (gemspec: Rails >= 7.0 / Ruby >= 3.2):
-          # tests only, resolved fresh from gemfiles/rails_7.gemfile so
-          # the advertised minimum keeps actually working, not just
-          # parsing.
-          - ruby: "3.2"
-            gemfile: gemfiles/rails_7.gemfile
-            name: rails-7.0-floor
-            task: rake test
-    env:
-      BUNDLE_GEMFILE: ${{ github.workspace }}/${{ matrix.gemfile }}
+        ruby:
+          - '4.0.1'
 
     steps:
       - uses: actions/checkout@v6
@@ -44,5 +28,5 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
-      - name: Run the task
-        run: bundle exec ${{ matrix.task }}
+      - name: Run the default task
+        run: bundle exec rake

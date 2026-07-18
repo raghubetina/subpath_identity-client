@@ -38,9 +38,9 @@ Gem::Specification.new do |spec|
   # (added in core 0.2.0) on a provider "account gone", and speaks the
   # v2 cookie format. An older 0.1 core satisfies "< 1.0" but lacks both.
   spec.add_dependency "subpath_identity", ">= 0.2", "< 1.0"
-  spec.add_dependency "activesupport", ">= 7.0"
-  spec.add_dependency "activerecord", ">= 7.0"
-  spec.add_dependency "railties", ">= 7.0"
+  spec.add_dependency "activesupport", ">= 8.1"
+  spec.add_dependency "activerecord", ">= 8.1"
+  spec.add_dependency "railties", ">= 8.1"
 
   # For more information and examples about making a new gem, check out our
   # guide at: https://bundler.io/guides/creating_gem.html
