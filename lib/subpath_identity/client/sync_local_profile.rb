@@ -43,9 +43,33 @@ module SubpathIdentity
         profile = model.find_by(global_user_id: current_shared_identity[:user_id])
         if profile.nil? || profile.root_cache_key != current_shared_identity[:cache_key]
           remote = RootProfileClient.fetch(cookies[SubpathIdentity.config.cookie_name])
+          return revoke_local_identity(profile) if remote == RootProfileClient::GONE
+
           profile = upsert_local_profile(model, remote) if remote
         end
         @current_local_profile = profile
+      end
+
+      # The provider gave a definitive "no valid account for this
+      # identity" (a closed or deleted account — GONE, not a transient
+      # nil). Drop the cached copy of its profile and clear the shared
+      # identity cookie, which (being Path=/) signs the account out
+      # across every app in the cluster on its next request, not just
+      # here.
+      #
+      # Bounded, deliberately: this only fires when a fetch actually
+      # happens — i.e. on a cache_key mismatch. While the cookie's
+      # cache_key still matches the local row, no fetch occurs (that's
+      # the whole point of the cache_key), so a closure made elsewhere
+      # that doesn't re-encode this visitor's cookie isn't noticed until
+      # something does force a fetch, or until the cookie hits its own
+      # TTL. Closing that window entirely would mean re-validating with
+      # the provider on every request, defeating the cache. clear_shared_identity
+      # comes from SubpathIdentity::ControllerHelpers (include it first).
+      def revoke_local_identity(profile)
+        profile&.destroy
+        clear_shared_identity
+        @current_local_profile = nil
       end
 
       # Two first-visits from the same user can both find no local row

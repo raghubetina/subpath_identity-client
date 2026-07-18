@@ -53,11 +53,31 @@ class RootProfileClientTest < Minitest::Test
     end
   end
 
-  def test_returns_nil_on_a_non_success_http_response
+  def test_returns_nil_on_a_401_which_is_a_secret_mismatch_not_a_missing_account
+    # 401 means the provider couldn't authenticate the cookie the client
+    # thinks is valid (secret skew, clock skew) — transient/config, not
+    # "this account is gone." Must stay nil (degrade to cache), not GONE.
     response = Net::HTTPUnauthorized.new("1.1", "401", "Unauthorized")
 
     Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
       assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+    end
+  end
+
+  def test_returns_nil_on_a_5xx_server_error
+    response = Net::HTTPInternalServerError.new("1.1", "500", "Internal Server Error")
+
+    Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
+      assert_nil SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
+    end
+  end
+
+  def test_returns_gone_for_a_404_definitive_missing_or_closed_account
+    response = Net::HTTPNotFound.new("1.1", "404", "Not Found")
+
+    Net::HTTP.stub(:new, FakeNetHTTP.new(response)) do
+      assert_equal SubpathIdentity::Client::RootProfileClient::GONE,
+        SubpathIdentity::Client::RootProfileClient.fetch("some-cookie")
     end
   end
 

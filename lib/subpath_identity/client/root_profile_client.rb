@@ -15,6 +15,15 @@ module SubpathIdentity
     # timeout, malformed response) returns nil rather than raising: a
     # stale or missing local profile cache is a degraded page, not a 500.
     module RootProfileClient
+      # Returned by fetch when the provider gives a *definitive* "this
+      # identity resolves to no valid account" answer — HTTP 404, i.e. a
+      # closed/deleted account or an unknown user_id. Distinct from nil,
+      # which means "couldn't tell" (timeout, connection refused, 5xx,
+      # a 401 secret-mismatch, a malformed body). Callers treat GONE as
+      # authoritative revocation — drop the cached profile, sign out —
+      # and nil as a transient failure to degrade-to-cache against.
+      GONE = :account_gone
+
       class << self
         def fetch(shared_identity_cookie)
           return nil if shared_identity_cookie.blank?
@@ -35,6 +44,11 @@ module SubpathIdentity
           request["Cookie"] = "#{SubpathIdentity.config.cookie_name}=#{CGI.escape(shared_identity_cookie)}"
 
           response = http.request(request)
+          # 404 is the provider's definitive "no valid account for this
+          # identity" (see subpath_identity-provider's InternalController
+          # — a closed account 404s just like an unknown user_id). Every
+          # other non-success (401, 5xx, ...) is "couldn't tell" -> nil.
+          return GONE if response.is_a?(Net::HTTPNotFound)
           return nil unless response.is_a?(Net::HTTPSuccess)
 
           JSON.parse(response.body, symbolize_names: true)

@@ -54,7 +54,15 @@ The first sync for a given user uses `create_or_find_by`, which is safe against 
 
 ## Failure handling
 
-`RootProfileClient.fetch` returns `nil` — never raises — on timeout, connection failure, TLS failure, a non-2xx response, or a malformed body. A network hiccup degrades to "keep showing the last cached profile," not a 500.
+`RootProfileClient.fetch` returns `nil` — never raises — on timeout, connection failure, TLS failure, a 401/5xx response, or a malformed body. A network hiccup degrades to "keep showing the last cached profile," not a 500.
+
+It distinguishes one case: an HTTP **404** from the provider means "this identity resolves to no valid account" (a closed or deleted account, or an unknown `user_id`), which is authoritative rather than transient. `fetch` returns `RootProfileClient::GONE` for a 404, and `SyncLocalProfile` responds by deleting the local profile row and calling `clear_shared_identity` — which, because the shared cookie is `Path=/`, signs the account out across every app in the cluster on its next request. Everything else stays `nil` and degrades to the cache.
+
+For this to hold, your provider's internal endpoint must return 404 for a closed/deleted account, not 200 with stale data (see `subpath_identity-provider`'s README).
+
+### Revocation is bounded by the cookie TTL
+
+This revocation only fires when a fetch actually happens — i.e. on a `cache_key` mismatch. While the shared cookie's `cache_key` still matches the local row, `SyncLocalProfile` doesn't contact the provider at all (that's the point of the cache), so an account closed elsewhere in a way that doesn't re-encode this visitor's cookie isn't noticed until something forces a fetch, or until the shared cookie reaches its own TTL (`SubpathIdentity.config.cookie_ttl`, 24h by default). Closing that window entirely would mean re-validating with the provider on every request, which defeats the cache. If you need tighter revocation, shorten the TTL.
 
 ## Development
 

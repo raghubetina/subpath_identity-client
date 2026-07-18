@@ -7,6 +7,7 @@ class SyncLocalProfileTest < Minitest::Test
     include SubpathIdentity::Client::SyncLocalProfile
 
     attr_accessor :fake_signed_in, :fake_shared_identity, :fake_cookies
+    attr_reader :cleared_shared_identity
 
     def signed_in?
       fake_signed_in
@@ -18,6 +19,16 @@ class SyncLocalProfileTest < Minitest::Test
 
     def cookies
       fake_cookies
+    end
+
+    # Stands in for SubpathIdentity::ControllerHelpers#clear_shared_identity,
+    # which the real host controller provides (SyncLocalProfile expects it
+    # to be included first). The real one is unit-tested in the core gem;
+    # here we only need to verify SyncLocalProfile *calls* it on GONE.
+    def clear_shared_identity
+      @cleared_shared_identity = true
+      fake_cookies.delete(SubpathIdentity.config.cookie_name)
+      self.fake_signed_in = false
     end
 
     def index
@@ -103,6 +114,23 @@ class SyncLocalProfileTest < Minitest::Test
 
       refute_nil controller.current_local_profile
       assert_equal "cached@example.com", controller.current_local_profile.email
+      refute controller.cleared_shared_identity, "a transient nil must not revoke the identity"
+    end
+  end
+
+  def test_revokes_the_local_identity_when_the_provider_reports_the_account_gone
+    LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "closed@example.com")
+
+    gone = SubpathIdentity::Client::RootProfileClient::GONE
+    SubpathIdentity::Client::RootProfileClient.stub(:fetch, gone) do
+      # cache_key mismatch forces the fetch that surfaces the GONE result.
+      controller = build_controller(user_id: 1, cache_key: "accounts/1-v2")
+      controller.process(:index)
+
+      assert_nil controller.current_local_profile
+      assert_nil LocalProfile.find_by(global_user_id: 1), "the stale local row should be destroyed"
+      assert controller.cleared_shared_identity, "the shared identity cookie should be cleared"
+      assert_nil controller.fake_cookies[:_shared_identity]
     end
   end
 
