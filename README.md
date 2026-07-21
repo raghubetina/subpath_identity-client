@@ -12,8 +12,8 @@ yet, so declare **both** git sources — pin tags for a reproducible build:
 
 ```ruby
 # Gemfile
-gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.4.0"
-gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.4.0"
+gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.5.0"
+gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.5.0"
 ```
 
 (Once these are published, `bundle add subpath_identity-client` will pull
@@ -80,7 +80,9 @@ The first sync for a given user uses `create_or_find_by`, which is safe against 
 
 `RootProfileClient.fetch` returns `nil` — never raises — on timeout, connection failure, TLS failure, a 401/5xx response, or a malformed body. A network hiccup degrades to "keep showing the last cached profile," not a 500.
 
-It distinguishes one case: an HTTP **410 Gone whose JSON body is `{"error": "account_gone"}`** means "this identity resolves to no valid account" (a closed or deleted account, or an unknown `user_id`) — authoritative rather than transient. `fetch` returns `RootProfileClient::GONE` for that typed response, and `SyncLocalProfile` responds by deleting the local profile row and calling `clear_shared_identity` — which, because the shared cookie is `Path=/`, signs the account out across every app in the cluster on its next request. Everything else stays `nil` and degrades to the cache.
+It distinguishes one case: an HTTP **410 Gone whose JSON body is `{"error": "account_gone"}`** means "this identity resolves to no valid account" (a closed or deleted account, or an unknown `user_id`) — authoritative rather than transient. `fetch` returns `RootProfileClient::GONE` for that typed response, and `SyncLocalProfile` responds by **tombstoning** the local profile row (setting `revoked_at` and blanking its cached columns) and calling `clear_shared_identity` — which, because the shared cookie is `Path=/`, signs the account out across every app in the cluster on its next request. Everything else stays `nil` and degrades to the cache.
+
+The row is tombstoned, not deleted, on purpose. The provider fetch has no per-user lock, so an *older* success can resume after a *newer* revocation — if revocation deleted the row, that stale success would `create_or_find_by` a fresh one and resurrect the closed account. The tombstone is a permanent "this id is gone" marker (account ids never reuse) that a later fetch refuses to overwrite, so result order can't undo a revocation. Blanking the columns also erases the cached PII at revocation. Your generated model needs a `revoked_at` column — the `subpath_identity_client:install` migration adds it; an existing install needs a migration adding `t.datetime :revoked_at`.
 
 A plain **404 is deliberately not revocation.** 404 says a resource wasn't found without saying which one — a mistyped `internal_profile_path`, a route missing mid-deploy, a stale origin image, or an intermediary's own 404 page all produce it, and treating any of those as "account gone" would destroy cached profiles and sign real users out cluster-wide on an infrastructure hiccup. Only the typed 410 carries revocation semantics; an untyped 410 (an HTML error page, a different error value) doesn't qualify either.
 
@@ -90,7 +92,7 @@ For revocation to work, your provider's internal endpoint must return `410` with
 
 This revocation only fires when a fetch actually happens — i.e. on a `cache_key` mismatch. While the shared cookie's `cache_key` still matches the local row, `SyncLocalProfile` doesn't contact the provider at all (that's the point of the cache), so an account closed elsewhere in a way that doesn't re-encode this visitor's cookie isn't noticed until something forces a fetch, or until the shared cookie reaches its own TTL (`SubpathIdentity.config.cookie_ttl`, 24h by default). Closing that window entirely would mean re-validating with the provider on every request, which defeats the cache. If you need tighter revocation, shorten the TTL.
 
-Worth being explicit about a separate limit here: the TTL bounds how long a closed account is *displayed*, not how long its cached data is *retained*. The `local_profiles` row — including whatever columns your `sync_remote_profile` block copied, like email and name — stays in this app's own database until a `GONE` fetch deletes it, which for the common "cache key never changed" closure never happens. If your requirement is that a closed account's PII be *erased* from relying parties within a bounded time (not merely hidden), this gem's cache doesn't do that on its own — you'd add a periodic revalidation (re-fetch when the row is older than N minutes even on a cache-key match, trading a provider call per user per interval) or a provider-driven purge. For a cluster where the relying parties are the same operator's own apps, indefinite cache retention is usually acceptable; decide deliberately rather than assuming the TTL covers it.
+Worth being explicit about what's bounded and what isn't. When a revocation *does* fire, the cached PII is erased immediately (the tombstone blanks the row's columns). But revocation only fires when a fetch happens — i.e. on a `cache_key` mismatch. While a closed account's cookie still matches the cached row, no fetch occurs, so the closure isn't noticed (and the PII isn't erased) until something forces a mismatch or the cookie hits its absolute deadline. If you need a closed account's PII *gone* from relying parties within a bounded time regardless of cookie state, this gem's lazy cache doesn't do that on its own — add periodic revalidation (re-fetch when the row is older than N minutes even on a match) or a provider-driven purge. For a cluster where the relying parties are the same operator's own apps, this is usually fine; decide deliberately rather than assuming the cookie TTL covers retention.
 
 ## Development
 

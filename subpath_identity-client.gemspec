@@ -34,13 +34,13 @@ Gem::Specification.new do |spec|
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
 
-  # >= 0.4: this gem reissues the shared cookie with the provider's
-  # cache key after a fetch, which is only safe on a core whose
-  # write_shared_identity preserves the identity's absolute deadline
-  # (added in 0.4.0, wire format v3) — on an older core that rewrite
-  # would silently extend the identity's lifetime. It also uses
-  # clear_shared_identity (0.2.0+).
-  spec.add_dependency "subpath_identity", ">= 0.4", "< 1.0"
+  # >= 0.5: this gem reissues the shared cookie with the provider's
+  # cache key inside the before_action, then the app's action may write
+  # it again — only safe on a core whose write_shared_identity updates
+  # the in-request identity so the second write composes with the first
+  # (0.5.0) rather than discarding it, and preserves the identity's
+  # absolute deadline (0.4.0, wire v3). Also uses clear_shared_identity.
+  spec.add_dependency "subpath_identity", ">= 0.5", "< 1.0"
   spec.add_dependency "activesupport", ">= 8.1"
   spec.add_dependency "activerecord", ">= 8.1"
   spec.add_dependency "railties", ">= 8.1"

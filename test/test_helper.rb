@@ -28,6 +28,7 @@ ActiveRecord::Schema.define do
     t.integer :global_user_id, null: false
     t.string :root_cache_key
     t.string :email
+    t.datetime :revoked_at
     t.timestamps
   end
   add_index :local_profiles, :global_user_id, unique: true

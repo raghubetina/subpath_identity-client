@@ -142,9 +142,60 @@ class SyncLocalProfileTest < Minitest::Test
       controller.process(:index)
 
       assert_nil controller.current_local_profile
-      assert_nil LocalProfile.find_by(global_user_id: 1), "the stale local row should be destroyed"
+      row = LocalProfile.find_by(global_user_id: 1)
+      refute_nil row, "the row is kept as a tombstone, not deleted"
+      refute_nil row.revoked_at, "the row is marked revoked"
+      assert_nil row.email, "cached PII is erased at revocation"
       assert controller.cleared_shared_identity, "the shared identity cookie should be cleared"
       assert_nil controller.fake_cookies[:_shared_identity]
+    end
+  end
+
+  # A tombstone is permanent: a browser that still holds a valid cookie
+  # for a since-closed account must stay signed out (re-revoked without
+  # a fetch), never display the cached profile again.
+  def test_a_tombstoned_row_re_revokes_without_fetching
+    LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", revoked_at: Time.now)
+
+    SubpathIdentity::Client::RootProfileClient.stub(:fetch, ->(*, **) { raise "should not fetch a tombstoned account" }) do
+      # cache_key matches the tombstone row, so nothing would fetch anyway;
+      # the point is that a tombstone short-circuits to revocation.
+      controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+      controller.process(:index)
+
+      assert_nil controller.current_local_profile
+      assert controller.cleared_shared_identity
+    end
+  end
+
+  # The review-9 race: an older in-flight success must not resurrect a
+  # newer revocation. Browser A fetches while the account is active and
+  # gets v1, but its response is delayed. Browser B receives the 410,
+  # tombstones the row. A's older success resumes — create_or_find_by
+  # finds the tombstone, and upsert must refuse to overwrite it, so A
+  # also ends up revoked rather than displaying the pre-closure profile.
+  def test_a_late_success_after_revocation_does_not_resurrect_the_account
+    # No row yet when browser A's request begins — A's find_by returns
+    # nil, so the top-level tombstone check doesn't fire and A proceeds
+    # to fetch. The stub models browser B closing the account DURING A's
+    # in-flight fetch: it tombstones the row as a side effect, then
+    # returns A's older (pre-closure) success. When A resumes to upsert,
+    # create_or_find_by finds that fresh tombstone and must refuse it.
+    stale_success = {user_id: 1, email: "active-before-close@example.com", cache_key: "accounts/1-v1"}
+    fetch_stub = lambda do |*, **|
+      LocalProfile.create!(global_user_id: 1, revoked_at: Time.now, root_cache_key: nil, email: nil)
+      stale_success
+    end
+
+    SubpathIdentity::Client::RootProfileClient.stub(:fetch, fetch_stub) do
+      controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+      controller.process(:index)
+
+      assert_nil controller.current_local_profile, "the stale success must not be displayed"
+      assert controller.cleared_shared_identity, "A must also end up revoked"
+      row = LocalProfile.find_by(global_user_id: 1)
+      refute_nil row.revoked_at, "the row stays a tombstone"
+      assert_nil row.email, "the pre-closure PII must not be restored"
     end
   end
 

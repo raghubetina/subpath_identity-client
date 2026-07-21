@@ -7,4 +7,9 @@ class LocalProfile < ApplicationRecord
   # ActiveRecord::RecordInvalid instead, which create_or_find_by doesn't
   # rescue — Rails' own docs call this out as the wrong combination.
   validates :global_user_id, presence: true
+
+  # SyncLocalProfile sets revoked_at to tombstone a gone account and
+  # blanks every other (cached-profile) column. If you add columns with
+  # NOT NULL constraints, give them a default or make them nullable, so
+  # revocation can blank them.
 end

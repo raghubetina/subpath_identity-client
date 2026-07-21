@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-21
+
+- **Revocation now tombstones the local row instead of deleting it.** The provider fetch has no per-user lock, so an older in-flight success could resume after a newer revocation and `create_or_find_by` a fresh row — resurrecting a closed account. A revoked row is now kept with `revoked_at` set (and its cached columns blanked, erasing the PII), and a later fetch refuses to overwrite it, making revocation monotonic against result order. **Requires a new `revoked_at` column** — `subpath_identity_client:install` adds it; an existing install needs a migration adding `t.datetime :revoked_at` to `local_profiles`.
+- Core dependency floor raised to `>= 0.5`: this gem reissues the shared cookie in a `before_action` and the app's action may write it again, which only composes correctly on core 0.5.0's memo-updating `write_shared_identity` (an older core would discard the first write).
+
 ## [0.4.0] - 2026-07-21
 
 - **Multi-browser convergence: the row stores the provider's authoritative `cache_key`, and the requesting browser's shared cookie is reissued with it after a fetch.** 0.3.0's fix (recording the requesting cookie's claim) converged for one browser but oscillated with two: a single shared row can't represent two browsers' different still-valid claims, so alternating requests forced a provider call and a row write every time. Now each stale browser pays for exactly one fetch. The reissue never extends the identity's lifetime — it relies on core >= 0.4's deadline-preserving `write_shared_identity`, which is why the core dependency floor rises to `>= 0.4` (wire format v3; all apps in the cluster upgrade together).
