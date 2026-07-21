@@ -19,9 +19,10 @@ module SubpathIdentity
     #
     # The local model needs exactly two columns this gem manages
     # directly — global_user_id (the identity link) and root_cache_key
-    # (the staleness signal: the cookie's cache_key claim this row was
-    # last synced under, see upsert_local_profile) — plus whatever else
-    # sync_remote_profile populates. See subpath_identity_client:install for a generator
+    # (the staleness signal: the provider's authoritative cache key, see
+    # upsert_local_profile) — plus whatever else sync_remote_profile
+    # populates. Include SubpathIdentity::ControllerHelpers first: this
+    # concern uses its write_shared_identity and clear_shared_identity. See subpath_identity_client:install for a generator
     # that scaffolds both the migration and a starting model.
     module SyncLocalProfile
       extend ActiveSupport::Concern
@@ -49,7 +50,25 @@ module SubpathIdentity
           )
           return revoke_local_identity(profile) if remote == RootProfileClient::GONE
 
-          profile = upsert_local_profile(model, remote) if remote
+          if remote
+            profile = upsert_local_profile(model, remote)
+            # Reissue THIS browser's cookie with the provider's
+            # authoritative cache key, so the next request compares
+            # equal and skips the fetch. The local row is shared by
+            # every browser this user has, so it alone can't record
+            # which version each browser has seen — without the cookie
+            # rewrite, two browsers holding different still-valid claims
+            # make the row oscillate: each request overwrites the row to
+            # its own claim and forces the other browser to refetch,
+            # every time, forever. With it, each stale browser pays for
+            # exactly one fetch and converges. Safe against lifetime
+            # extension: write_shared_identity preserves the identity's
+            # absolute deadline (core >= 0.4) unless explicitly renewed,
+            # which this deliberately never does.
+            if remote[:cache_key] != current_shared_identity[:cache_key]
+              write_shared_identity(cache_key: remote[:cache_key])
+            end
+          end
         end
         @current_local_profile = profile
       end
@@ -93,29 +112,22 @@ module SubpathIdentity
       # rescue ever gets a chance to run — see the generated model for
       # why there isn't one).
       #
-      # root_cache_key records the COOKIE's cache_key claim this row was
-      # last synced under — deliberately not the cache_key the provider
-      # returned. sync_local_profile compares local-vs-cookie, so storing
-      # the provider's (possibly newer) value would never converge: a
-      # cookie still carrying v1 while the provider is already at v2 (an
-      # edit from another device, say) would mismatch on every request
-      # and refetch forever. Storing the cookie's claim converges on the
-      # very next request while still keeping the freshest *data* the
-      # provider returned; when the cookie itself eventually moves to
-      # v2, exactly one more refetch re-marks the row.
-      #
-      # The same rule fixes the losing side of the insert race: whatever
-      # cookie claim THIS request carried is what the row ends up marked
-      # with, so a loser holding an older claim re-syncs once and stops.
+      # root_cache_key records the PROVIDER's authoritative cache key —
+      # the version of the data actually held. The requesting browser's
+      # cookie is brought up to the same value by the reissue in
+      # sync_local_profile, which is what makes the local-vs-cookie
+      # comparison converge for every browser (an earlier attempt stored
+      # the requesting cookie's claim instead, which converged for one
+      # browser but made two browsers with different still-valid claims
+      # oscillate the row on alternating requests).
       def upsert_local_profile(model, remote)
         sync_block = SubpathIdentity.config.sync_remote_profile
-        cookie_cache_key = current_shared_identity[:cache_key]
         profile = model.create_or_find_by(global_user_id: current_shared_identity[:user_id]) do |record|
-          record.root_cache_key = cookie_cache_key
+          record.root_cache_key = remote[:cache_key]
           sync_block&.call(record, remote)
         end
-        if profile.root_cache_key != cookie_cache_key
-          profile.root_cache_key = cookie_cache_key
+        if profile.root_cache_key != remote[:cache_key]
+          profile.root_cache_key = remote[:cache_key]
           sync_block&.call(profile, remote)
           profile.save!
         end

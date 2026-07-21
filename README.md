@@ -12,8 +12,8 @@ yet, so declare **both** git sources — pin tags for a reproducible build:
 
 ```ruby
 # Gemfile
-gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.3.1"
-gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.3.1"
+gem "subpath_identity", github: "raghubetina/subpath_identity", tag: "v0.4.0"
+gem "subpath_identity-client", github: "raghubetina/subpath_identity-client", tag: "v0.4.0"
 ```
 
 (Once these are published, `bundle add subpath_identity-client` will pull
@@ -68,7 +68,7 @@ The generated `local_profiles` table has a `root_cache_key` column alongside wha
 
 This means the provider app is responsible for bumping `cache_key` (see its own README) whenever the underlying account changes in a way relying parties should notice.
 
-One subtlety that matters for convergence: `root_cache_key` records the **cookie's** `cache_key` claim the row was last synced under, not the `cache_key` the provider returned. The provider can legitimately be *ahead* of the cookie (the account was edited from another device after this browser's cookie was issued) — if the row stored the provider's newer key, it would mismatch the cookie on every request and refetch forever. Storing the cookie's claim converges on the very next request while still keeping the freshest data the fetch returned; when the cookie itself catches up, exactly one more refetch re-marks the row.
+One subtlety that matters for convergence: after a successful fetch, the row stores the **provider's** authoritative `cache_key`, and this browser's shared cookie is **reissued** with that same key (via `write_shared_identity`), so the next request compares equal and skips the fetch. Both halves are load-bearing. The provider can legitimately be *ahead* of a still-valid cookie (the account was edited from another device), so without the cookie reissue that browser would mismatch and refetch on every request forever. And the row alone can't fix that, because it's shared by every browser the user has: an earlier version of this gem recorded the requesting cookie's claim in the row instead, which converged for one browser but made two browsers holding different still-valid claims *oscillate* — each alternating request overwrote the row to its own claim and forced the other browser to refetch, every time. Reissuing each stale browser's cookie up to the provider's key means each pays for exactly one fetch and then everyone agrees. The reissue never extends the identity's life: `write_shared_identity` preserves the identity's absolute deadline (core >= 0.4) unless explicitly told to renew, which this gem never does.
 
 The fetch also refuses to apply a response whose `user_id` isn't the one the cookie asserted — a provider routing or cache bug that returns some *other* user's profile degrades like any malformed response instead of being persisted and displayed under the wrong identity.
 

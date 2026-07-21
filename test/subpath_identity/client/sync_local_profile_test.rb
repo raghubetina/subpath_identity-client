@@ -21,6 +21,20 @@ class SyncLocalProfileTest < Minitest::Test
       fake_cookies
     end
 
+    # Stands in for ControllerHelpers#write_shared_identity (unit-tested
+    # in the core gem, including that it preserves the identity's
+    # absolute deadline). Mimics the observable effect SyncLocalProfile
+    # relies on: the current identity's claims change, and the browser
+    # would carry the rewritten cookie on its next request.
+    def write_shared_identity(**claims)
+      (@written_identity_claims ||= []) << claims
+      fake_shared_identity.merge!(claims)
+    end
+
+    def written_identity_claims
+      @written_identity_claims || []
+    end
+
     # Stands in for SubpathIdentity::ControllerHelpers#clear_shared_identity,
     # which the real host controller provides (SyncLocalProfile expects it
     # to be included first). The real one is unit-tested in the core gem;
@@ -188,10 +202,11 @@ class SyncLocalProfileTest < Minitest::Test
   # Regression for a non-converging refetch loop: on a first visit the
   # provider can legitimately return a NEWER cache_key than the browser
   # cookie carries (the account was edited from another device after the
-  # cookie was issued). Storing the provider's key made every subsequent
-  # request mismatch the cookie and refetch forever; storing the
-  # cookie's claim converges — the second request must not contact the
-  # provider at all.
+  # cookie was issued). The fix: store the provider's authoritative key
+  # in the row AND reissue this browser's cookie with it, so the next
+  # request compares equal. The browser's evolved cookie state is
+  # simulated between requests, exactly as a real browser would carry
+  # the rewritten cookie forward.
   def test_a_provider_snapshot_newer_than_the_cookie_does_not_cause_a_refetch_loop
     body = {user_id: 1, email: "fresh@example.com", cache_key: "accounts/1-v2"}.to_json
     fetches = 0
@@ -207,18 +222,63 @@ class SyncLocalProfileTest < Minitest::Test
       ok
     end
 
+    browser_cache_key = "accounts/1-v1"
     Net::HTTP.stub(:new, fake_http) do
       2.times do
-        controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+        controller = build_controller(user_id: 1, cache_key: browser_cache_key)
         controller.process(:index)
 
         assert_equal "fresh@example.com", controller.current_local_profile.email
+        # Carry the rewritten cookie forward, as the browser would.
+        browser_cache_key = controller.current_shared_identity[:cache_key]
       end
     end
 
     assert_equal 1, fetches, "the second request must be served from the converged cache"
-    assert_equal "accounts/1-v1", LocalProfile.find_by(global_user_id: 1).root_cache_key,
-      "the row records the cookie's claim it was synced under, not the provider's newer key"
+    assert_equal "accounts/1-v2", browser_cache_key,
+      "the browser's cookie should have been reissued with the provider's key"
+    assert_equal "accounts/1-v2", LocalProfile.find_by(global_user_id: 1).root_cache_key,
+      "the row records the provider's authoritative key"
+  end
+
+  # Regression for cache oscillation between two browsers: one holds a
+  # still-valid v1 cookie, another holds v2, the provider is on v2. A
+  # single shared row can't record both browsers' versions, so before
+  # the cookie-reissue fix each alternating request overwrote the row to
+  # its own claim and forced the other browser to refetch — a provider
+  # call and a database write on EVERY request, forever. Now each stale
+  # browser pays for exactly one fetch and everyone converges on the
+  # provider's key.
+  def test_two_browsers_with_different_cookie_versions_converge_instead_of_oscillating
+    body = {user_id: 1, email: "fresh@example.com", cache_key: "accounts/1-v2"}.to_json
+    fetches = 0
+    fake_http = Object.new
+    fake_http.define_singleton_method(:use_ssl=) { |_| }
+    fake_http.define_singleton_method(:open_timeout=) { |_| }
+    fake_http.define_singleton_method(:read_timeout=) { |_| }
+    fake_http.define_singleton_method(:request) do |_req|
+      fetches += 1
+      ok = Net::HTTPOK.new("1.1", "200", "OK")
+      ok.instance_variable_set(:@read, true)
+      ok.instance_variable_set(:@body, body)
+      ok
+    end
+
+    browsers = {a: "accounts/1-v1", b: "accounts/1-v2"}
+    Net::HTTP.stub(:new, fake_http) do
+      # Alternate a, b, a, b — the review-8 oscillation sequence.
+      %i[a b a b].each do |browser|
+        controller = build_controller(user_id: 1, cache_key: browsers[browser])
+        controller.process(:index)
+        browsers[browser] = controller.current_shared_identity[:cache_key]
+      end
+    end
+
+    assert_equal 1, fetches,
+      "only browser a's one stale request may contact the provider; alternation must not oscillate"
+    assert_equal "accounts/1-v2", browsers[:a]
+    assert_equal "accounts/1-v2", browsers[:b]
+    assert_equal "accounts/1-v2", LocalProfile.find_by(global_user_id: 1).root_cache_key
   end
 
   # Regression test for a real race: two concurrent first-visits from the

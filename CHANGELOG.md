@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
+- **Multi-browser convergence: the row stores the provider's authoritative `cache_key`, and the requesting browser's shared cookie is reissued with it after a fetch.** 0.3.0's fix (recording the requesting cookie's claim) converged for one browser but oscillated with two: a single shared row can't represent two browsers' different still-valid claims, so alternating requests forced a provider call and a row write every time. Now each stale browser pays for exactly one fetch. The reissue never extends the identity's lifetime — it relies on core >= 0.4's deadline-preserving `write_shared_identity`, which is why the core dependency floor rises to `>= 0.4` (wire format v3; all apps in the cluster upgrade together).
+- `required_ruby_version` raised to `>= 3.3` and CI runs the declared floor against the committed lockfile (the lock pins `parallel 2.1.0`, whose own floor is Ruby 3.3 — the previously declared 3.2 couldn't `bundle install` from a fresh clone).
+
 ## [0.3.1] - 2026-07-18
 
 - Declared Rails floors raised to `>= 8.1` (activesupport/activerecord/railties) — the toolchain CI actually tests. Rails 7 was never deliberately supported, only inherited from scaffolding defaults; the 0.3.0 floor-CI rig (`gemfiles/rails_7.gemfile`, the Ruby 3.2 job, the sqlite3 `>= 1.4` loosening) is removed.

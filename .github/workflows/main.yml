@@ -15,8 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     name: Ruby ${{ matrix.ruby }}
     strategy:
+      fail-fast: false
       matrix:
         ruby:
+          # 3.3 is the declared floor (required_ruby_version) — same
+          # committed Gemfile.lock, so this catches a lock that can't
+          # even install there (e.g. a dependency whose own floor is
+          # newer than ours).
+          - '3.3'
           - '4.0.1'
 
     steps:

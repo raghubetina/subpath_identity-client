@@ -15,7 +15,7 @@ Gem::Specification.new do |spec|
     "owning it themselves."
   spec.homepage = "https://github.com/raghubetina/subpath_identity-client"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.2.0"
+  spec.required_ruby_version = ">= 3.3.0"
   spec.metadata["allowed_push_host"] = "https://rubygems.org"
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = spec.homepage
@@ -34,10 +34,13 @@ Gem::Specification.new do |spec|
   spec.executables = spec.files.grep(%r{\Aexe/}) { |f| File.basename(f) }
   spec.require_paths = ["lib"]
 
-  # >= 0.2: this gem calls SubpathIdentity::ControllerHelpers#clear_shared_identity
-  # (added in core 0.2.0) on a provider "account gone", and speaks the
-  # v2 cookie format. An older 0.1 core satisfies "< 1.0" but lacks both.
-  spec.add_dependency "subpath_identity", ">= 0.2", "< 1.0"
+  # >= 0.4: this gem reissues the shared cookie with the provider's
+  # cache key after a fetch, which is only safe on a core whose
+  # write_shared_identity preserves the identity's absolute deadline
+  # (added in 0.4.0, wire format v3) — on an older core that rewrite
+  # would silently extend the identity's lifetime. It also uses
+  # clear_shared_identity (0.2.0+).
+  spec.add_dependency "subpath_identity", ">= 0.4", "< 1.0"
   spec.add_dependency "activesupport", ">= 8.1"
   spec.add_dependency "activerecord", ">= 8.1"
   spec.add_dependency "railties", ">= 8.1"
