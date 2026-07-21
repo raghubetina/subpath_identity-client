@@ -52,6 +52,7 @@ class SyncLocalProfileTest < Minitest::Test
 
   def setup
     LocalProfile.delete_all
+    SubpathIdentity::Client::Revocation.delete_all
     SubpathIdentity.configure do |c|
       c.local_profile_model = LocalProfile
       c.sync_remote_profile { |profile, remote| profile.email = remote[:email] }
@@ -142,28 +143,46 @@ class SyncLocalProfileTest < Minitest::Test
       controller.process(:index)
 
       assert_nil controller.current_local_profile
-      row = LocalProfile.find_by(global_user_id: 1)
-      refute_nil row, "the row is kept as a tombstone, not deleted"
-      refute_nil row.revoked_at, "the row is marked revoked"
-      assert_nil row.email, "cached PII is erased at revocation"
+      assert_nil LocalProfile.find_by(global_user_id: 1), "the cached row (and its PII) is deleted"
+      assert SubpathIdentity::Client::Revocation.exists?(global_user_id: 1), "a durable revocation marker is recorded"
       assert controller.cleared_shared_identity, "the shared identity cookie should be cleared"
       assert_nil controller.fake_cookies[:_shared_identity]
     end
   end
 
-  # A tombstone is permanent: a browser that still holds a valid cookie
-  # for a since-closed account must stay signed out (re-revoked without
-  # a fetch), never display the cached profile again.
-  def test_a_tombstoned_row_re_revokes_without_fetching
-    LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", revoked_at: Time.now)
+  # A marker is permanent: a browser that still holds a valid cookie for
+  # a since-closed account must stay signed out (re-revoked without a
+  # fetch), never display a resurrected cached profile.
+  def test_a_marked_account_re_revokes_without_fetching
+    SubpathIdentity::Client::Revocation.create!(global_user_id: 1)
+    # A stray cached row (e.g. recreated by an earlier stale success)
+    # must be reaped, not displayed.
+    LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "leaked@example.com")
 
-    SubpathIdentity::Client::RootProfileClient.stub(:fetch, ->(*, **) { raise "should not fetch a tombstoned account" }) do
-      # cache_key matches the tombstone row, so nothing would fetch anyway;
-      # the point is that a tombstone short-circuits to revocation.
+    SubpathIdentity::Client::RootProfileClient.stub(:fetch, ->(*, **) { raise "should not fetch a revoked account" }) do
       controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
       controller.process(:index)
 
       assert_nil controller.current_local_profile
+      assert_nil LocalProfile.find_by(global_user_id: 1), "the stray row is reaped"
+      assert controller.cleared_shared_identity
+    end
+  end
+
+  # #2 regression: revocation must not 500 on a schema with a NOT NULL
+  # cached column (display_name, default "Anonymous") and a presence
+  # validation on it. The old nulling-based tombstone raised
+  # NotNullViolation / RecordInvalid here; deleting the row can't.
+  def test_revocation_succeeds_on_a_not_null_validated_cached_schema
+    LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "x@example.com", display_name: "Closed User")
+
+    gone = SubpathIdentity::Client::RootProfileClient::GONE
+    SubpathIdentity::Client::RootProfileClient.stub(:fetch, gone) do
+      controller = build_controller(user_id: 1, cache_key: "accounts/1-v2")
+      controller.process(:index) # must not raise
+
+      assert_nil LocalProfile.find_by(global_user_id: 1)
+      assert SubpathIdentity::Client::Revocation.exists?(global_user_id: 1)
       assert controller.cleared_shared_identity
     end
   end
@@ -174,29 +193,45 @@ class SyncLocalProfileTest < Minitest::Test
   # tombstones the row. A's older success resumes — create_or_find_by
   # finds the tombstone, and upsert must refuse to overwrite it, so A
   # also ends up revoked rather than displaying the pre-closure profile.
+  # The review-10 barrier: browser A has already loaded the row and
+  # passed the marker check, THEN browser B revokes (records the marker
+  # and deletes the row), THEN A applies its stale success. The marker
+  # is durable and separate, so A's recreated row is reaped by the
+  # post-upsert recheck and A ends up revoked — a stale success can't
+  # resurrect the account, regardless of partial-update settings (this
+  # path never nulls or partial-writes the marker).
   def test_a_late_success_after_revocation_does_not_resurrect_the_account
-    # No row yet when browser A's request begins — A's find_by returns
-    # nil, so the top-level tombstone check doesn't fire and A proceeds
-    # to fetch. The stub models browser B closing the account DURING A's
-    # in-flight fetch: it tombstones the row as a side effect, then
-    # returns A's older (pre-closure) success. When A resumes to upsert,
-    # create_or_find_by finds that fresh tombstone and must refuse it.
+    # No row and no marker when A begins — A passes the top-level check
+    # and proceeds to fetch. The stub models B revoking DURING A's
+    # in-flight fetch: it records the marker and deletes any row, then
+    # returns A's older (pre-closure) success. When A resumes past the
+    # upsert, the post-upsert marker recheck catches B's marker.
     stale_success = {user_id: 1, email: "active-before-close@example.com", cache_key: "accounts/1-v1"}
     fetch_stub = lambda do |*, **|
-      LocalProfile.create!(global_user_id: 1, revoked_at: Time.now, root_cache_key: nil, email: nil)
+      SubpathIdentity::Client::Revocation.create_or_find_by(global_user_id: 1)
+      LocalProfile.where(global_user_id: 1).delete_all
       stale_success
     end
 
-    SubpathIdentity::Client::RootProfileClient.stub(:fetch, fetch_stub) do
-      controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
-      controller.process(:index)
+    [true, false].each do |partial|
+      LocalProfile.delete_all
+      SubpathIdentity::Client::Revocation.delete_all
+      LocalProfile.partial_updates = partial
 
-      assert_nil controller.current_local_profile, "the stale success must not be displayed"
-      assert controller.cleared_shared_identity, "A must also end up revoked"
-      row = LocalProfile.find_by(global_user_id: 1)
-      refute_nil row.revoked_at, "the row stays a tombstone"
-      assert_nil row.email, "the pre-closure PII must not be restored"
+      SubpathIdentity::Client::RootProfileClient.stub(:fetch, fetch_stub) do
+        controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+        controller.process(:index)
+
+        assert_nil controller.current_local_profile, "partial_updates=#{partial}: stale success not displayed"
+        assert controller.cleared_shared_identity, "partial_updates=#{partial}: A ends up revoked"
+        assert SubpathIdentity::Client::Revocation.exists?(global_user_id: 1),
+          "partial_updates=#{partial}: the durable marker survives the stale success"
+        assert_nil LocalProfile.find_by(global_user_id: 1),
+          "partial_updates=#{partial}: the resurrected row is reaped"
+      end
     end
+  ensure
+    LocalProfile.partial_updates = true
   end
 
   # Exercises the REAL RootProfileClient.fetch (only the HTTP layer is

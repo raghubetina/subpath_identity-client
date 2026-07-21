@@ -3,15 +3,21 @@ class CreateLocalProfiles < ActiveRecord::Migration[<%= ActiveRecord::Migration.
     create_table :local_profiles do |t|
       t.integer :global_user_id, null: false
       t.string :root_cache_key
-      # Tombstone marker: set when the provider reports the account gone.
-      # SyncLocalProfile keeps a revoked row (with its cached columns
-      # blanked) rather than deleting it, so a stale in-flight fetch
-      # can't resurrect a closed account. See that concern's comments.
-      t.datetime :revoked_at
 
       t.timestamps
     end
 
     add_index :local_profiles, :global_user_id, unique: true
+
+    # Gem-owned revocation markers, kept separate from local_profiles so
+    # a marker survives the deletion of the cached row (see
+    # SubpathIdentity::Client::Revocation) and never inherits this app's
+    # profile-column constraints.
+    create_table :subpath_identity_client_revocations do |t|
+      t.integer :global_user_id, null: false
+      t.timestamps
+    end
+
+    add_index :subpath_identity_client_revocations, :global_user_id, unique: true
   end
 end

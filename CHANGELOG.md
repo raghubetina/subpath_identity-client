@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-21
+
+- **Revocation now uses a separate marker table, `subpath_identity_client_revocations`, and deletes the cached profile row** instead of tombstoning it in place. The in-row tombstone (0.5.0) was fragile: nulling a cached column to blank PII raised on a `NOT NULL`/validated/optimistically-locked schema (a definitive revocation became a 500), and a bare marker couldn't be inserted for a first-visit gone account at all. Deleting the row erases the PII with no such hazard, and the separate durable marker survives a stale in-flight success (which can recreate the row) so revocation is monotonic against result order — verified across both `partial_updates` settings. **Requires a new table** — `subpath_identity_client:install` creates it; an existing install needs a migration creating `subpath_identity_client_revocations` (`global_user_id`, unique index) and, if it added the 0.5.0 `revoked_at` column, may drop it.
+
 ## [0.5.0] - 2026-07-21
 
 - **Revocation now tombstones the local row instead of deleting it.** The provider fetch has no per-user lock, so an older in-flight success could resume after a newer revocation and `create_or_find_by` a fresh row — resurrecting a closed account. A revoked row is now kept with `revoked_at` set (and its cached columns blanked, erasing the PII), and a later fetch refuses to overwrite it, making revocation monotonic against result order. **Requires a new `revoked_at` column** — `subpath_identity_client:install` adds it; an existing install needs a migration adding `t.datetime :revoked_at` to `local_profiles`.

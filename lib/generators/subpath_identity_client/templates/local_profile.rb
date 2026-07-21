@@ -8,8 +8,8 @@ class LocalProfile < ApplicationRecord
   # rescue — Rails' own docs call this out as the wrong combination.
   validates :global_user_id, presence: true
 
-  # SyncLocalProfile sets revoked_at to tombstone a gone account and
-  # blanks every other (cached-profile) column. If you add columns with
-  # NOT NULL constraints, give them a default or make them nullable, so
-  # revocation can blank them.
+  # Add whatever profile columns you want to cache (email, name, ...).
+  # SyncLocalProfile deletes this row on revocation — it never nulls
+  # your columns — so NOT NULL constraints and presence validations on
+  # them are fine.
 end

@@ -4,6 +4,7 @@ require "subpath_identity"
 require_relative "client/version"
 require_relative "client/configuration"
 require_relative "client/root_profile_client"
+require_relative "client/revocation"
 require_relative "client/sync_local_profile"
 
 # For every app in a subpath_identity cluster that's a relying party —

@@ -28,12 +28,23 @@ ActiveRecord::Schema.define do
     t.integer :global_user_id, null: false
     t.string :root_cache_key
     t.string :email
-    t.datetime :revoked_at
+    # A NOT NULL cached column with a default, plus a presence
+    # validation below — the exact schema shape that broke the old
+    # nulling-based revocation. Revocation deletes the row now, so
+    # neither trips it.
+    t.string :display_name, null: false, default: "Anonymous"
     t.timestamps
   end
   add_index :local_profiles, :global_user_id, unique: true
+
+  create_table :subpath_identity_client_revocations, force: true do |t|
+    t.integer :global_user_id, null: false
+    t.timestamps
+  end
+  add_index :subpath_identity_client_revocations, :global_user_id, unique: true
 end
 
 class LocalProfile < ActiveRecord::Base
   validates :global_user_id, presence: true
+  validates :display_name, presence: true
 end
