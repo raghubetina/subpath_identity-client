@@ -36,3 +36,5 @@ jobs:
           bundler-cache: true
       - name: Run the default task
         run: bundle exec rake
+      - name: README install block resolves from a clean Gemfile
+        run: bin/check-readme-install

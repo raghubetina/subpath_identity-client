@@ -12,4 +12,11 @@ class LocalProfile < ApplicationRecord
   # SyncLocalProfile deletes this row on revocation — it never nulls
   # your columns — so NOT NULL constraints and presence validations on
   # them are fine.
+  #
+  # That revocation-time delete is a plain DELETE (no callbacks, no
+  # dependent: handling), so if you add tables that reference this one,
+  # declare their foreign keys on_delete: :cascade — or override
+  # remove_local_profile_rows in your controller for cleanup a cascade
+  # can't express. See "What revocation assumes about your schema" in
+  # this gem's README.
 end

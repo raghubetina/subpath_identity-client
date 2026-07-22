@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "active_support"
 require "active_support/concern"
 
 module SubpathIdentity
@@ -66,10 +67,22 @@ module SubpathIdentity
             # discard this now-stale success rather than display a gone
             # account or reissue its cookie: recheck AFTER the upsert, so
             # a marker recorded between our first check and now is still
-            # caught. (A marker recorded after this recheck but before
-            # the response finishes leaks one request's display and
-            # self-heals on the next; closing that fully would need a row
-            # lock, overkill for a cache.)
+            # caught.
+            #
+            # A marker can still land after this recheck while this
+            # response finishes. Then this request displays the stale
+            # profile, and its cookie reissue below races the revoking
+            # response's deletion at the browser (two concurrent
+            # Set-Cookie for one name — RFC 6265 leaves the winner
+            # undefined). In THIS app the next request self-heals via
+            # the top-of-action marker check. If the reissue wins,
+            # OTHER apps keep honoring the cookie until its absolute
+            # deadline — the same TTL-bounded exposure as a browser
+            # that never visits this app at all, and no longer, because
+            # the reissue never renews the deadline. No finite number
+            # of rechecks closes this window, and the browser, not the
+            # server, orders two in-flight responses — see "Revocation
+            # is bounded by the cookie TTL" in the README.
             return reap_and_sign_out(model, uid) if Revocation.exists?(global_user_id: uid)
 
             # Reissue THIS browser's cookie with the provider's
@@ -104,17 +117,39 @@ module SubpathIdentity
         reap_and_sign_out(model, uid)
       end
 
-      # The effects of a known revocation: delete the cached profile row
-      # (a plain DELETE — no column nulling, so no NOT NULL / validation
-      # / lock_version hazards, and it erases the cached PII), clear the
-      # shared identity cookie (Path=/, so the account is signed out
-      # across the cluster on its next request), and don't expose a
-      # profile. delete_all of zero rows is a harmless no-op, so this is
-      # safe whether or not a row currently exists.
+      # The effects of a known revocation, in fail-closed order: first
+      # clear the shared identity cookie (Path=/, so the account is
+      # signed out across the cluster on its next request) and stop
+      # exposing a profile — steps that can't fail — and only then
+      # attempt the row cleanup, which can (the host schema may block
+      # the DELETE; see remove_local_profile_rows). A cleanup failure
+      # is reported to the app's error reporter and swallowed: letting
+      # it raise would discard the response along with its
+      # cookie-deletion header and turn every request for a
+      # definitively gone account into the same 500, forever — signing
+      # out must not depend on cleanup succeeding.
       def reap_and_sign_out(model, uid)
-        model.where(global_user_id: uid).delete_all
         clear_shared_identity
         @current_local_profile = nil
+        # Same reporter Rails.error exposes, so a failure surfaces in
+        # the host's error tracker instead of vanishing.
+        ActiveSupport.error_reporter.handle(StandardError, severity: :error, source: "subpath_identity-client") do
+          remove_local_profile_rows(model, uid)
+        end
+      end
+
+      # The row cleanup a revocation performs, separated out as an
+      # override point. The default is a plain delete_all: no column
+      # nulling (so no NOT NULL / validation / lock_version hazards), it
+      # erases the cached PII, and deleting zero rows is a no-op. But a
+      # plain DELETE is blocked by an inbound foreign key, and it skips
+      # dependent: cleanup and callbacks entirely — so if other tables
+      # reference your profile model, either declare those FKs
+      # on_delete: :cascade or override this method in your controller
+      # with cleanup that fits your schema (e.g. destroy-based,
+      # accepting that your callbacks then run inside revocation).
+      def remove_local_profile_rows(model, uid)
+        model.where(global_user_id: uid).delete_all
       end
 
       # Two first-visits from the same user can both find no local row

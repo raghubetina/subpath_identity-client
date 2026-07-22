@@ -42,9 +42,23 @@ ActiveRecord::Schema.define do
     t.timestamps
   end
   add_index :subpath_identity_client_revocations, :global_user_id, unique: true
+
+  # An inbound foreign key onto local_profiles with no cascade and no
+  # dependent: wiring — the host-extension shape that blocks
+  # revocation's row DELETE with ActiveRecord::InvalidForeignKey.
+  # Revocation must fail closed around it: cookie cleared, marker kept,
+  # failure reported rather than raised.
+  create_table :profile_notes, force: true do |t|
+    t.references :local_profile, null: false, foreign_key: true
+    t.string :body
+  end
 end
 
 class LocalProfile < ActiveRecord::Base
   validates :global_user_id, presence: true
   validates :display_name, presence: true
+end
+
+class ProfileNote < ActiveRecord::Base
+  belongs_to :local_profile
 end

@@ -1,0 +1,50 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Proves the README's documented installation block actually resolves:
+# extracts the first ```ruby fence after "## Installation" and runs
+# `bundle lock` on exactly those gem lines from a clean directory.
+# Exists because a release once shipped pinning a dependency tag that
+# didn't exist — the gems version independently, and nothing short of
+# bundling the documented block catches that drift.
+#
+# Network-dependent (clones the pinned git sources), so it runs as its
+# own CI step, not inside the default rake task. Release-flow
+# consequence: the README names the tag being cut, so main and the new
+# tag must be pushed together (git push origin main vX.Y.Z) or the CI
+# run between the two pushes fails this check.
+
+require "tmpdir"
+
+readme = File.read(File.expand_path("../README.md", __dir__))
+install = readme.split(/^## Installation$/, 2)[1] or abort "no '## Installation' section in README.md"
+block = install[/^```ruby\n(.*?)^```/m, 1] or abort "no ```ruby fence in the Installation section"
+gem_lines = block.lines.grep(/^\s*gem\s/)
+abort "no gem lines in the Installation fence" if gem_lines.empty?
+
+puts "Bundling the README's documented install block:"
+puts gem_lines.join
+
+Dir.mktmpdir do |dir|
+  File.write(File.join(dir, "Gemfile"), <<~GEMFILE)
+    source "https://rubygems.org"
+    #{gem_lines.join}
+  GEMFILE
+  # A scrubbed Bundler environment: the repo's own .bundle config (or
+  # setup-ruby's deployment/frozen settings) must not leak into what is
+  # supposed to be a fresh adopter's `bundle lock`. BUNDLE_PATH inside
+  # the tmpdir matters most — it's where Bundler keeps bare git
+  # mirrors, and a machine- or runner-cached mirror cloned before a tag
+  # existed makes that tag look missing (Bundler doesn't refetch tags
+  # into an existing mirror), failing this check falsely.
+  env = {
+    "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
+    "BUNDLE_APP_CONFIG" => File.join(dir, ".bundle"),
+    "BUNDLE_PATH" => File.join(dir, "vendor"),
+    "BUNDLE_FROZEN" => "false",
+    "BUNDLE_DEPLOYMENT" => "false"
+  }
+  system(env, "bundle", "lock", chdir: dir, exception: true)
+end
+
+puts "README install block resolves."

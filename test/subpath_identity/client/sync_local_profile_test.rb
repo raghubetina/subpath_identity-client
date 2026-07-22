@@ -50,7 +50,20 @@ class SyncLocalProfileTest < Minitest::Test
     end
   end
 
+  # Overrides the documented cleanup override point: this host schema
+  # has dependents (ProfileNote), so a bare DELETE can't work — remove
+  # the dependents first, then the rows.
+  class DependentCleanupController < FakeController
+    private
+
+    def remove_local_profile_rows(model, uid)
+      model.where(global_user_id: uid).each { |profile| ProfileNote.where(local_profile: profile).delete_all }
+      model.where(global_user_id: uid).delete_all
+    end
+  end
+
   def setup
+    ProfileNote.delete_all
     LocalProfile.delete_all
     SubpathIdentity::Client::Revocation.delete_all
     SubpathIdentity.configure do |c|
@@ -63,14 +76,28 @@ class SyncLocalProfileTest < Minitest::Test
     SubpathIdentity.reset_config!
   end
 
-  def build_controller(user_id:, cache_key:)
-    controller = FakeController.new
+  def build_controller(user_id:, cache_key:, controller_class: FakeController)
+    controller = controller_class.new
     controller.fake_signed_in = true
     controller.fake_shared_identity = {user_id: user_id, cache_key: cache_key}
     controller.fake_cookies = {_shared_identity: "cookie-for-#{user_id}"}
     controller.request = ActionDispatch::TestRequest.create
     controller.response = ActionDispatch::TestResponse.new
     controller
+  end
+
+  # Collects everything reported to ActiveSupport.error_reporter (the
+  # object Rails.error exposes) during the block — how the suite proves
+  # a swallowed cleanup failure was reported rather than silent.
+  def collect_error_reports
+    reports = []
+    collector = Object.new
+    collector.define_singleton_method(:report) { |error, **| reports << error }
+    ActiveSupport.error_reporter.subscribe(collector)
+    yield
+    reports
+  ensure
+    ActiveSupport.error_reporter.unsubscribe(collector)
   end
 
   def test_is_a_no_op_when_signed_out
@@ -232,6 +259,85 @@ class SyncLocalProfileTest < Minitest::Test
     end
   ensure
     LocalProfile.partial_updates = true
+  end
+
+  # review-11 regression: a host table referencing the cache row (an
+  # inbound FK, no cascade, no dependent: wiring) blocks revocation's
+  # row DELETE. Revocation must fail CLOSED around that: the marker is
+  # recorded and the cookie cleared BEFORE cleanup is attempted, and the
+  # cleanup failure is reported and swallowed. Before this fix the
+  # InvalidForeignKey raised ahead of clear_shared_identity, the 500
+  # discarded the cookie-deletion header, and every later request
+  # repeated the same failing delete — a definitively closed account
+  # stayed signed in, 500ing forever, PII retained.
+  def test_revocation_fails_closed_when_the_cached_row_cannot_be_deleted
+    profile = LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "closed@example.com")
+    ProfileNote.create!(local_profile: profile, body: "host data pointing at the cache row")
+
+    reports = collect_error_reports do
+      gone = SubpathIdentity::Client::RootProfileClient::GONE
+      SubpathIdentity::Client::RootProfileClient.stub(:fetch, gone) do
+        controller = build_controller(user_id: 1, cache_key: "accounts/1-v2")
+        controller.process(:index) # must not raise
+
+        assert controller.cleared_shared_identity, "the cookie must be cleared even though the row can't be deleted"
+        assert_nil controller.current_local_profile
+        assert SubpathIdentity::Client::Revocation.exists?(global_user_id: 1), "the marker is recorded before cleanup"
+      end
+    end
+
+    refute_nil LocalProfile.find_by(global_user_id: 1),
+      "setup check: the FK really did block the delete (the row survives, its PII lingering until the host fixes cleanup)"
+    assert reports.any? { |e| e.is_a?(ActiveRecord::InvalidForeignKey) },
+      "the swallowed cleanup failure must be reported to the error reporter, not silent"
+  end
+
+  # The same blocked DELETE on the no-fetch path: the marker already
+  # exists and the stray row can't be deleted. Every request must still
+  # end signed out — the pre-fix behavior here was the worst loop:
+  # marker check → failing delete → 500 before clear_shared_identity,
+  # on every single request, with no way out but a schema fix.
+  def test_a_marked_account_stays_signed_out_even_when_the_row_cannot_be_deleted
+    SubpathIdentity::Client::Revocation.create!(global_user_id: 1)
+    profile = LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "leaked@example.com")
+    ProfileNote.create!(local_profile: profile, body: "blocks the reap")
+
+    reports = collect_error_reports do
+      SubpathIdentity::Client::RootProfileClient.stub(:fetch, ->(*, **) { raise "should not fetch a revoked account" }) do
+        controller = build_controller(user_id: 1, cache_key: "accounts/1-v1")
+        controller.process(:index) # must not raise
+
+        assert controller.cleared_shared_identity
+        assert_nil controller.current_local_profile
+      end
+    end
+
+    assert reports.any? { |e| e.is_a?(ActiveRecord::InvalidForeignKey) }
+  end
+
+  # The documented way out for a schema with dependents: override
+  # remove_local_profile_rows with cleanup that fits the schema. The
+  # override runs inside revocation, everything is removed, and nothing
+  # needs reporting.
+  def test_remove_local_profile_rows_is_an_override_point_for_dependent_cleanup
+    profile = LocalProfile.create!(global_user_id: 1, root_cache_key: "accounts/1-v1", email: "closed@example.com")
+    ProfileNote.create!(local_profile: profile, body: "cleaned up by the override")
+
+    reports = collect_error_reports do
+      gone = SubpathIdentity::Client::RootProfileClient::GONE
+      SubpathIdentity::Client::RootProfileClient.stub(:fetch, gone) do
+        controller = build_controller(user_id: 1, cache_key: "accounts/1-v2", controller_class: DependentCleanupController)
+        controller.process(:index)
+
+        assert controller.cleared_shared_identity
+        assert_nil controller.current_local_profile
+      end
+    end
+
+    assert_nil LocalProfile.find_by(global_user_id: 1), "the override's cleanup ran"
+    assert_equal 0, ProfileNote.count
+    assert SubpathIdentity::Client::Revocation.exists?(global_user_id: 1)
+    assert_empty reports, "a working override has nothing to report"
   end
 
   # Exercises the REAL RootProfileClient.fetch (only the HTTP layer is
